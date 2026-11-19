@@ -1,0 +1,7 @@
+# Minimal Supabase CLI config. `supabase link` fills in the rest.
+project_id = "trading-competition-dashboard"
+
+[functions.report]
+# Bots authenticate with their own bot token (checked inside the function),
+# not a Supabase user JWT.
+verify_jwt = false
