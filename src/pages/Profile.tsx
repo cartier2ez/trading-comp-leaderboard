@@ -1,54 +1,35 @@
-import { useEffect, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { MOOD_EMOJI } from "../config";
+import { FaceSlots } from "../components/FaceSlots";
+import { demoFaceStore, supabaseFaceStore } from "../lib/faceStore";
 import { relativeTime } from "../lib/time";
-import type { Mood } from "../lib/types";
 
-const SLOTS: { mood: Mood; column: "gif_first" | "gif_second" | "gif_third"; label: string }[] = [
-  { mood: "first", column: "gif_first", label: "1st place (smiling)" },
-  { mood: "second", column: "gif_second", label: "2nd place (straight face)" },
-  { mood: "third", column: "gif_third", label: "3rd place (crying)" },
-];
-
-interface ProfileRow {
-  display_name: string;
-  color: string;
-  gif_first: string | null;
-  gif_second: string | null;
-  gif_third: string | null;
+function Toast({ msg, onClose }: { msg: string | null; onClose: () => void }) {
+  useEffect(() => {
+    if (!msg) return;
+    const t = setTimeout(onClose, 4000);
+    return () => clearTimeout(t);
+  }, [msg]); // timer restarts only for a new message
+  return msg ? (
+    <p className="toast" onClick={onClose}>
+      {msg}
+    </p>
+  ) : null;
 }
 
 export function Profile({ sb, userId }: { sb: SupabaseClient; userId: string }) {
-  const [profile, setProfile] = useState<ProfileRow | null>(null);
-  const [previews, setPreviews] = useState<Partial<Record<Mood, string>>>({});
+  const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState("");
   const [color, setColor] = useState("#6366f1");
   const [token, setToken] = useState<{ hint: string; created: string } | null>(null);
   const [newToken, setNewToken] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const faces = useMemo(() => supabaseFaceStore(sb, userId), [sb, userId]);
 
   const endpoint = `${import.meta.env.VITE_SUPABASE_URL as string}/functions/v1/report`;
 
-  const load = async () => {
-    const { data } = await sb
-      .from("profiles")
-      .select("display_name, color, gif_first, gif_second, gif_third")
-      .eq("id", userId)
-      .single<ProfileRow>();
-    if (!data) return;
-    setProfile(data);
-    setName(data.display_name);
-    setColor(data.color);
-    const next: Partial<Record<Mood, string>> = {};
-    for (const s of SLOTS) {
-      const path = data[s.column];
-      if (path) {
-        const { data: signed } = await sb.storage.from("gifs").createSignedUrl(path, 3600);
-        if (signed) next[s.mood] = signed.signedUrl;
-      }
-    }
-    setPreviews(next);
+  const loadToken = async () => {
     const { data: tok } = await sb
       .from("bot_tokens")
       .select("token_hint, created_at")
@@ -60,40 +41,22 @@ export function Profile({ sb, userId }: { sb: SupabaseClient; userId: string }) 
   };
 
   useEffect(() => {
-    void load();
-  }, [userId]);
+    void (async () => {
+      const { data } = await sb.from("profiles").select("display_name, color").eq("id", userId).single();
+      if (data) {
+        setName(data.display_name as string);
+        setColor(data.color as string);
+      }
+      await loadToken();
+      setLoaded(true);
+    })();
+  }, [sb, userId]);
 
   const saveBasics = async () => {
     setBusy(true);
     const { error } = await sb.from("profiles").update({ display_name: name.trim(), color }).eq("id", userId);
     setBusy(false);
     setMsg(error ? `Couldn't save: ${error.message}` : "Saved ✔");
-  };
-
-  const upload = async (slot: (typeof SLOTS)[number], e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file || !profile) return;
-    if (file.size > 8 * 1024 * 1024) {
-      setMsg("That file is over 8 MB. Try a smaller GIF.");
-      return;
-    }
-    setBusy(true);
-    const ext = (file.name.split(".").pop() ?? "gif").toLowerCase().replace(/[^a-z0-9]/g, "");
-    // A new filename each time, so browsers never show a cached old GIF.
-    const path = `${userId}/${slot.mood}-${Date.now()}.${ext}`;
-    const { error } = await sb.storage.from("gifs").upload(path, file, { contentType: file.type });
-    if (error) {
-      setBusy(false);
-      setMsg(`Upload failed: ${error.message}`);
-      return;
-    }
-    const old = profile[slot.column];
-    await sb.from("profiles").update({ [slot.column]: path }).eq("id", userId);
-    if (old) await sb.storage.from("gifs").remove([old]);
-    setBusy(false);
-    setMsg(`${slot.label} updated ✔`);
-    await load();
   };
 
   const generateToken = async () => {
@@ -108,18 +71,19 @@ export function Profile({ sb, userId }: { sb: SupabaseClient; userId: string }) 
       return;
     }
     setNewToken(data as string);
-    await load();
+    await loadToken();
   };
 
-  if (!profile) return <main className="profile"><p className="empty">Loading profile…</p></main>;
+  if (!loaded)
+    return (
+      <main className="profile">
+        <p className="empty">Loading profile…</p>
+      </main>
+    );
 
   return (
     <main className="profile">
-      {msg && (
-        <p className="toast" onClick={() => setMsg(null)}>
-          {msg}
-        </p>
-      )}
+      <Toast msg={msg} onClose={() => setMsg(null)} />
 
       <section className="panel">
         <h3>You</h3>
@@ -132,27 +96,13 @@ export function Profile({ sb, userId }: { sb: SupabaseClient; userId: string }) 
             Color
             <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
           </label>
-          <button onClick={saveBasics} disabled={busy || name.trim().length === 0}>
+          <button onClick={() => void saveBasics()} disabled={busy || name.trim().length === 0}>
             Save
           </button>
         </div>
       </section>
 
-      <section className="panel">
-        <h3>Your rank faces</h3>
-        <p className="muted">GIF, PNG, JPG or WebP, up to 8 MB. Everyone in the race sees these.</p>
-        <div className="slots">
-          {SLOTS.map((s) => (
-            <label key={s.mood} className="slot">
-              <div className="face small">
-                {previews[s.mood] ? <img src={previews[s.mood]} alt={s.label} /> : <span>{MOOD_EMOJI[s.mood]}</span>}
-              </div>
-              <span>{s.label}</span>
-              <input type="file" accept="image/gif,image/png,image/jpeg,image/webp" onChange={(e) => void upload(s, e)} disabled={busy} />
-            </label>
-          ))}
-        </div>
-      </section>
+      <FaceSlots store={faces} onMessage={setMsg} />
 
       <section className="panel">
         <h3>Bot token</h3>
@@ -183,6 +133,21 @@ export function Profile({ sb, userId }: { sb: SupabaseClient; userId: string }) 
           {token ? "Replace token" : "Generate token"}
         </button>
       </section>
+    </main>
+  );
+}
+
+/** Demo mode: faces go on Jon's demo card and stay in this browser only. */
+export function DemoProfile() {
+  const [msg, setMsg] = useState<string | null>(null);
+  return (
+    <main className="profile">
+      <Toast msg={msg} onClose={() => setMsg(null)} />
+      <FaceSlots
+        store={demoFaceStore}
+        onMessage={setMsg}
+        note="Demo mode: these go on Jon's demo card and stay in this browser only (nothing is uploaded)."
+      />
     </main>
   );
 }

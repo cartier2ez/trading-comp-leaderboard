@@ -1,6 +1,7 @@
 // Demo mode: three fake bots with 30 days of history and a live tick every few
 // seconds, so you can watch ranks shuffle without a Supabase project.
 
+import { loadDemoFaces } from "./faceStore";
 import { etDate } from "./time";
 import type { DailyRecord, DataSource, Dataset, Person, Snapshot } from "./types";
 
@@ -126,7 +127,10 @@ export function demoSource(): DataSource {
   return {
     kind: "demo",
     async load() {
-      return { ...state, daily: [...state.daily], snapshots: [...state.snapshots] };
+      // Faces taken on the demo Profile page show on Jon's card.
+      const jonFaces = await loadDemoFaces();
+      const people = state.people.map((p) => (p.id === "demo-jon" ? { ...p, gifs: jonFaces } : p));
+      return { ...state, people, daily: [...state.daily], snapshots: [...state.snapshots] };
     },
     subscribe(onChange) {
       const timer = setInterval(() => {

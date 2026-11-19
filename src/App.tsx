@@ -6,7 +6,7 @@ import { isDemo, supabase } from "./lib/supabase";
 import { supabaseSource } from "./lib/supabaseSource";
 import { Leaderboard } from "./pages/Leaderboard";
 import { Login } from "./pages/Login";
-import { Profile } from "./pages/Profile";
+import { DemoProfile, Profile } from "./pages/Profile";
 
 type View = "race" | "profile";
 
@@ -38,20 +38,18 @@ export function App() {
           <button className={view === "race" ? "active" : ""} onClick={() => setView("race")}>
             Race
           </button>
-          {supabase && session && (
-            <>
-              <button className={view === "profile" ? "active" : ""} onClick={() => setView("profile")}>
-                Profile
-              </button>
-              <button onClick={() => void supabase!.auth.signOut()}>Sign out</button>
-            </>
-          )}
+          <button className={view === "profile" ? "active" : ""} onClick={() => setView("profile")}>
+            Profile
+          </button>
+          {supabase && session && <button onClick={() => void supabase!.auth.signOut()}>Sign out</button>}
         </nav>
       </header>
-      {view === "profile" && supabase && session ? (
+      {view !== "profile" ? (
+        <Leaderboard source={source} />
+      ) : supabase && session ? (
         <Profile sb={supabase} userId={session.user.id} />
       ) : (
-        <Leaderboard source={source} />
+        <DemoProfile />
       )}
     </>
   );

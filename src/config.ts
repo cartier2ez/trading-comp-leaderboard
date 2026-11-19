@@ -25,3 +25,10 @@ export const RULES_NOTE =
 
 /** How long the page waits without realtime events before re-fetching anyway. */
 export const FALLBACK_POLL_MS = 5 * 60 * 1000;
+
+/** What the camera screen tells you to do for each rank face. */
+export const MOOD_PROMPT: Record<Mood, string> = {
+  first: "1st place: smile big! 😁",
+  second: "2nd place: straight face 😐",
+  third: "3rd place: cry it out 😭",
+};
