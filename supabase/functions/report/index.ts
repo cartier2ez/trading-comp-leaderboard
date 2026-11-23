@@ -1,13 +1,13 @@
-// POST /functions/v1/report — the only way results get into the dashboard.
+// POST /functions/v1/report: the only way results get into the dashboard.
 //
 // Auth: `Authorization: Bearer tcb_...` (a bot token from the profile page).
 // Who the report belongs to comes from the token, never from the body.
-// Body: a snapshot or daily record, see validate.ts / BOT_GUIDE.md.
+// Body: a snapshot or a list of settled bets, see validate.ts / BOT_GUIDE.md.
 //
-// Deploy: supabase functions deploy report --no-verify-jwt
+// This file only connects storage; the logic is in handler.ts.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { validateReport } from "./validate.ts";
+import { handleReport, type SeasonInfo, type Store } from "./handler.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -15,85 +15,60 @@ const supabase = createClient(
   { auth: { persistSession: false } },
 );
 
-// A bot looping by mistake shouldn't flood the table.
-const MIN_SECONDS_BETWEEN_SNAPSHOTS = 60;
-
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
+function check(error: { message: string } | null): void {
+  if (error) throw new Error(error.message);
 }
 
-async function sha256Hex(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
-}
+const store: Store = {
+  async personForToken(tokenHash) {
+    const { data, error } = await supabase
+      .from("bot_tokens")
+      .select("person_id")
+      .eq("token_hash", tokenHash)
+      .is("revoked_at", null)
+      .maybeSingle();
+    check(error);
+    return data ? (data.person_id as string) : null;
+  },
 
-Deno.serve(async (req) => {
-  if (req.method !== "POST") {
-    return json(405, { error: "Use POST with a JSON body." });
-  }
+  async currentSeason() {
+    const settings = await supabase.from("settings").select("current_season").single();
+    check(settings.error);
+    const { data, error } = await supabase
+      .from("seasons")
+      .select("id, starts_at, ends_at, start_equity, live_start_equity")
+      .eq("id", settings.data!.current_season)
+      .single();
+    check(error);
+    return data as SeasonInfo;
+  },
 
-  const match = (req.headers.get("authorization") ?? "").match(/^Bearer\s+(tcb_[0-9a-f]{64})$/);
-  if (!match) {
-    return json(401, {
-      error: "Missing or malformed bot token. Send header `Authorization: Bearer tcb_...` " +
-        "with the token from your profile page.",
-    });
-  }
-
-  const { data: token, error: tokenError } = await supabase
-    .from("bot_tokens")
-    .select("person_id")
-    .eq("token_hash", await sha256Hex(match[1]!))
-    .is("revoked_at", null)
-    .maybeSingle();
-  if (tokenError) return json(500, { error: "Token lookup failed, try again." });
-  if (!token) {
-    return json(401, { error: "Unknown or revoked bot token. Generate a new one on your profile page." });
-  }
-  const personId: string = token.person_id;
-
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return json(400, { error: "Body must be valid JSON." });
-  }
-
-  const result = validateReport(body, new Date());
-  if (!result.ok) {
-    return json(422, { error: "Invalid report.", problems: result.problems });
-  }
-  const { type, ...fields } = result.report;
-
-  if (type === "snapshot") {
-    const { data: last } = await supabase
+  async lastSnapshotAt(personId, season, account) {
+    const { data, error } = await supabase
       .from("snapshots")
       .select("ts")
       .eq("person_id", personId)
-      .eq("account", fields.account)
+      .eq("season", season)
+      .eq("account", account)
       .order("ts", { ascending: false })
       .limit(1)
       .maybeSingle();
-    if (last && Date.now() - new Date(last.ts).getTime() < MIN_SECONDS_BETWEEN_SNAPSHOTS * 1000) {
-      return json(429, { error: `Too many snapshots: at most one per ${MIN_SECONDS_BETWEEN_SNAPSHOTS}s.` });
-    }
-    const { data, error } = await supabase
-      .from("snapshots")
-      .insert({ person_id: personId, ...fields })
-      .select("account, ts, equity, total_return_pct")
-      .single();
-    if (error) return json(500, { error: "Could not save snapshot.", detail: error.message });
-    return json(200, { ok: true, stored: { type, ...data } });
-  }
+    check(error);
+    return data ? (data.ts as string) : null;
+  },
 
-  const { data, error } = await supabase
-    .from("daily_records")
-    .upsert({ person_id: personId, ...fields, received_at: new Date().toISOString() })
-    .select("account, date, equity, total_return_pct")
-    .single();
-  if (error) return json(500, { error: "Could not save daily record.", detail: error.message });
-  return json(200, { ok: true, stored: { type, ...data } });
-});
+  async insertSnapshot(row) {
+    const { data, error } = await supabase.from("snapshots").insert(row).select("ts").single();
+    check(error);
+    return { ts: data!.ts as string };
+  },
+
+  async upsertBets(rows) {
+    const { error } = await supabase
+      .from("settled_bets")
+      .upsert(rows, { onConflict: "person_id,season,account,market_slug,side,settled_at" });
+    check(error);
+  },
+};
+
+Deno.serve((req) => handleReport(req, store, new Date()));

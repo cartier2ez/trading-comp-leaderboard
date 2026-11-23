@@ -1,50 +1,26 @@
 import type { Standing } from "./ranking";
 import type { Account, Dataset } from "./types";
 
+export const START_LABEL = "Start";
 export const LIVE_LABEL = "Now";
 
 export type ChartRow = { label: string } & Record<string, number | string | null>;
 
-/**
- * Rows for the race chart: one per trading day, a column per person (total %)
- * plus `spy`. The SPY line uses the benchmark reported by whoever started
- * tracking earliest, so it covers the whole x-axis. (If you start on different
- * days your SPY numbers differ; see "open rules" in CLAUDE.md.)
- */
+/** Start (everyone at 0%), one row per finished New York day, then the live value. */
 export function raceRows(ds: Dataset, account: Account, standings: Standing[]): ChartRow[] {
-  const start = ds.settings.competitionStart;
-  const records = ds.daily.filter((d) => d.account === account && (!start || d.date >= start));
-  if (records.length === 0) return [];
-
-  const earliest = records.reduce((m, d) => (d.trackingSince < m ? d.trackingSince : m), records[0]!.trackingSince);
-  const dates = [...new Set(records.map((d) => d.date))].sort();
-
-  const rows: ChartRow[] = dates.map((date) => {
+  const ranked = standings.filter((s) => s.stats !== null);
+  if (ranked.length === 0) return [];
+  const first: ChartRow = { label: START_LABEL };
+  const last: ChartRow = { label: LIVE_LABEL };
+  for (const s of ranked) {
+    first[s.person.id] = 0;
+    last[s.person.id] = s.stats!.totalReturnPct;
+  }
+  const closes = ds.closes.filter((c) => c.account === account);
+  const days = [...new Set(closes.map((c) => c.date))].sort().map((date) => {
     const row: ChartRow = { label: date.slice(5) };
-    const spy = records.filter((d) => d.date === date && d.trackingSince === earliest).map((d) => d.benchmarkReturnPct);
-    row.spy = spy.length > 0 ? spy.reduce((a, b) => a + b, 0) / spy.length : null;
-    for (const d of records.filter((r) => r.date === date)) row[d.personId] = d.totalReturnPct;
+    for (const c of closes) if (c.date === date) row[c.personId] = c.totalReturnPct;
     return row;
   });
-
-  // Live point for anyone whose latest number is an intraday snapshot.
-  const live = standings.filter((s) => s.source === "snapshot" && s.totalReturnPct !== null);
-  if (live.length > 0) {
-    const row: ChartRow = { label: LIVE_LABEL, spy: null };
-    for (const s of live) row[s.person.id] = s.totalReturnPct;
-    rows.push(row);
-  }
-  return rows;
-}
-
-/** One person's line plus their own SPY line, for the card sparkline. */
-export function personRows(ds: Dataset, account: Account, standing: Standing): ChartRow[] {
-  const rows: ChartRow[] = ds.daily
-    .filter((d) => d.account === account && d.personId === standing.person.id)
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .map((d) => ({ label: d.date.slice(5), you: d.totalReturnPct, spy: d.benchmarkReturnPct }));
-  if (standing.source === "snapshot" && standing.totalReturnPct !== null) {
-    rows.push({ label: LIVE_LABEL, you: standing.totalReturnPct, spy: null });
-  }
-  return rows;
+  return [first, ...days, last];
 }

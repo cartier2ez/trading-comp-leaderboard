@@ -1,35 +1,44 @@
 import { describe, expect, it } from "vitest";
+import { raceRows } from "../src/lib/chart";
+import { betRecord } from "../src/lib/format";
 import { detectOvertakes } from "../src/lib/overtakes";
-import { assignRanks, computeStandings, maxDrawdownPct, moodFor } from "../src/lib/ranking";
-import type { DailyRecord, Dataset, Snapshot } from "../src/lib/types";
+import { assignRanks, computeStandings, moodFor } from "../src/lib/ranking";
+import { isStale, seasonPhase, timeUntil } from "../src/lib/time";
+import type { Account, Dataset, DayClose, Season, Stats } from "../src/lib/types";
 
-const people = ["a", "b", "c"].map((id) => ({ id, displayName: id.toUpperCase(), color: "#000000", gifs: {} }));
+const season: Season = {
+  id: "s",
+  name: "Polymarket",
+  startsAt: "2026-12-01T05:00:00Z",
+  endsAt: "2027-06-01T04:00:00Z",
+  startEquity: 10000,
+};
 
-function day(personId: string, date: string, total: number, dayPct = 0): DailyRecord {
+function stat(personId: string, total: number, account: Account = "paper"): Stats {
   return {
     personId,
-    account: "paper",
-    date,
-    equity: 100000 * (1 + total / 100),
-    dayReturnPct: dayPct,
+    account,
+    lastSeen: "2026-12-03T15:00:00Z",
+    equity: 10000 * (1 + total / 100),
     totalReturnPct: total,
-    benchmarkReturnPct: 0,
-    strategy: null,
-    trackingSince: "2026-11-16",
-    receivedAt: `${date}T21:20:00Z`,
+    todayPct: 0,
+    maxDrawdownPct: 0,
+    openPositions: null,
+    settledBets: null,
+    wonBets: null,
+    feesPaid: null,
   };
 }
 
-function snap(personId: string, ts: string, total: number): Snapshot {
-  return { personId, account: "paper", ts, equity: 100000 * (1 + total / 100), totalReturnPct: total };
-}
-
-function ds(daily: DailyRecord[], snapshots: Snapshot[] = []): Dataset {
+function ds(stats: Stats[], closes: DayClose[] = []): Dataset {
   return {
-    people,
-    daily,
-    snapshots,
-    settings: { competitionStart: null, competitionEnd: null, snapshotMinutes: 10, staleAfterMinutes: 30 },
+    people: ["a", "b", "c"].map((id) => ({ id, displayName: id.toUpperCase(), color: "#000000", gifs: {} })),
+    season,
+    stats,
+    closes,
+    bets: [],
+    checkIns: [],
+    settings: { snapshotMinutes: 10, staleAfterMinutes: 45 },
   };
 }
 
@@ -42,50 +51,65 @@ describe("ranking", () => {
   it("maps ranks to moods: first happy, last crying, middle straight", () => {
     const ranks = [1, 2, 3];
     expect(ranks.map((r) => moodFor(r, ranks))).toEqual(["first", "second", "third"]);
-    expect(moodFor(1, [1, 1, 3])).toBe("first");
     expect(moodFor(1, [1])).toBe("first");
     expect(moodFor(null, [1])).toBeNull();
   });
 
-  it("computes max drawdown from the return series", () => {
-    expect(maxDrawdownPct([0, 10, -1])).toBeCloseTo((0.99 / 1.1 - 1) * 100);
-    expect(maxDrawdownPct([1, 2, 3])).toBe(0);
-    expect(maxDrawdownPct([])).toBeNull();
+  it("orders people, keeps accounts apart and leaves non-reporters unranked", () => {
+    const data = ds([stat("a", 1), stat("b", 4), stat("c", 9, "live")]);
+    expect(computeStandings(data, "paper").map((s) => [s.person.id, s.rank])).toEqual([["b", 1], ["a", 2], ["c", null]]);
+    expect(computeStandings(data, "live")[0]!.person.id).toBe("c");
   });
 
-  it("uses a newer-day snapshot for live ranking and today's %", () => {
-    const data = ds(
-      [day("a", "2026-11-18", 2, 0.5), day("b", "2026-11-18", 1), day("c", "2026-11-18", 0)],
-      [snap("b", "2026-11-19T15:00:00Z", 4.03)], // b: 1% -> 4.03% total = +3% today
+  it("detects overtakes", () => {
+    const before = computeStandings(ds([stat("a", 2), stat("b", 1)]), "paper");
+    const after = computeStandings(ds([stat("a", 2), stat("b", 3)]), "paper");
+    expect(detectOvertakes(before, after)).toMatchObject([{ passer: "B", passed: "A", newRank: 1 }]);
+  });
+});
+
+describe("race chart rows", () => {
+  it("goes start, closes, now, and works on day one", () => {
+    const closes: DayClose[] = [{ personId: "a", account: "paper", date: "2026-12-01", totalReturnPct: 1 }];
+    const data = ds([stat("a", 2), stat("b", -1)], closes);
+    expect(raceRows(data, "paper", computeStandings(data, "paper"))).toEqual([
+      { label: "Start", a: 0, b: 0 },
+      { label: "12-01", a: 1 },
+      { label: "Now", a: 2, b: -1 },
+    ]);
+    const none = ds([]);
+    expect(raceRows(none, "paper", computeStandings(none, "paper"))).toEqual([]);
+  });
+});
+
+describe("time", () => {
+  const at = (s: string) => new Date(s);
+  it("knows the season phase", () => {
+    expect(seasonPhase(season, at("2026-12-01T04:59:59Z"))).toBe("before");
+    expect(seasonPhase(season, at("2026-12-01T05:00:00Z"))).toBe("running");
+    expect(seasonPhase(season, at("2027-06-01T04:00:00Z"))).toBe("over");
+  });
+
+  it("marks silent bots stale 24/7, but only while the season runs", () => {
+    const last = "2026-12-05T08:00:00Z"; // a Saturday, 3 AM in New York
+    expect(isStale(last, season, 45, at("2026-12-05T08:45:00Z"))).toBe(false);
+    expect(isStale(last, season, 45, at("2026-12-05T08:46:00Z"))).toBe(true);
+    expect(isStale(last, season, 45, at("2027-07-01T00:00:00Z"))).toBe(false);
+    expect(isStale(null, season, 45, at("2026-12-05T08:46:00Z"))).toBe(false);
+  });
+
+  it("counts down", () => {
+    expect(timeUntil("2026-12-01T05:00:00Z", at("2026-11-23T05:00:00Z"))).toBe("8 days");
+    expect(timeUntil("2026-12-01T05:00:00Z", at("2026-12-01T04:48:00Z"))).toBe("12 min");
+  });
+});
+
+describe("bet record", () => {
+  it("shows only what the bot sends", () => {
+    expect(betRecord(stat("a", 0))).toBeNull();
+    expect(betRecord({ ...stat("a", 0), settledBets: 0, wonBets: 0 })).toBe("0 settled");
+    expect(betRecord({ ...stat("a", 0), settledBets: 14, wonBets: 8, openPositions: 3, feesPaid: 12.4 })).toBe(
+      "14 settled · 57% won · 3 open · $12.40 fees",
     );
-    const s = computeStandings(data, "paper");
-    expect(s.map((x) => x.person.id)).toEqual(["b", "a", "c"]);
-    expect(s[0]!.source).toBe("snapshot");
-    expect(s[0]!.todayPct).toBeCloseTo(3);
-    expect(s[1]!.todayPct).toBe(0.5);
-    expect(s.map((x) => x.mood)).toEqual(["first", "second", "third"]);
-  });
-
-  it("prefers the daily close over a same-day snapshot", () => {
-    const data = ds([day("a", "2026-11-19", 1)], [snap("a", "2026-11-19T20:50:00Z", 9)]);
-    expect(computeStandings(data, "paper")[0]!.totalReturnPct).toBe(1);
-  });
-
-  it("keeps people without data unranked and last", () => {
-    const s = computeStandings(ds([day("b", "2026-11-18", 1)]), "paper");
-    expect(s[0]!.person.id).toBe("b");
-    expect(s.slice(1).every((x) => x.rank === null)).toBe(true);
-    expect(computeStandings(ds([day("b", "2026-11-18", 1)]), "live").every((x) => x.rank === null)).toBe(true);
-  });
-
-  it("detects overtakes between two rankings", () => {
-    const before = computeStandings(ds([day("a", "2026-11-18", 2), day("b", "2026-11-18", 1)]), "paper");
-    const after = computeStandings(
-      ds([day("a", "2026-11-18", 2), day("b", "2026-11-18", 1)], [snap("b", "2026-11-19T15:00:00Z", 3)]),
-      "paper",
-    );
-    const o = detectOvertakes(before, after);
-    expect(o).toHaveLength(1);
-    expect(o[0]).toMatchObject({ passer: "B", passed: "A", newRank: 1 });
   });
 });

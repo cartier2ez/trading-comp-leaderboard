@@ -1,22 +1,25 @@
 import type { CSSProperties } from "react";
-import { Line, LineChart, ResponsiveContainer, YAxis } from "recharts";
+import { Line, LineChart, ReferenceLine, ResponsiveContainer, YAxis } from "recharts";
 import { MOOD_EMOJI, MOOD_TAGLINE, RANK_MEDAL } from "../config";
 import type { ChartRow } from "../lib/chart";
-import { fmtMoney, fmtPct, tone } from "../lib/format";
+import { betRecord, fmtMoney, fmtPct, tone } from "../lib/format";
 import type { Standing } from "../lib/ranking";
 import { relativeTime } from "../lib/time";
+import type { Stats } from "../lib/types";
 
 interface Props {
   standing: Standing;
+  stats: Stats;
   stale: boolean;
   now: Date;
-  spark: ChartRow[];
+  rows: ChartRow[];
   cardRef: (el: HTMLElement | null) => void;
 }
 
-export function PodiumCard({ standing: s, stale, now, spark, cardRef }: Props) {
+export function PodiumCard({ standing: s, stats, stale, now, rows, cardRef }: Props) {
   const mood = s.mood ?? "second";
   const gif = s.person.gifs[mood];
+  const record = betRecord(stats);
   return (
     <article
       ref={cardRef}
@@ -27,9 +30,9 @@ export function PodiumCard({ standing: s, stale, now, spark, cardRef }: Props) {
         <span className="medal" aria-label={`Rank ${s.rank}`}>
           {s.rank !== null ? (RANK_MEDAL[s.rank] ?? `#${s.rank}`) : "…"}
         </span>
-        <span className={`seen ${stale ? "stale" : ""}`} title={s.lastSeen ?? undefined}>
+        <span className={`seen ${stale ? "stale" : ""}`} title={stats.lastSeen}>
           {stale ? "💤 " : ""}
-          {relativeTime(s.lastSeen, now)}
+          {relativeTime(stats.lastSeen, now)}
         </span>
       </div>
 
@@ -41,36 +44,41 @@ export function PodiumCard({ standing: s, stale, now, spark, cardRef }: Props) {
       <h2 className="name">{s.person.displayName}</h2>
       <p className="tagline">{MOOD_TAGLINE[mood]}</p>
 
-      <p className={`total ${tone(s.totalReturnPct)}`}>{fmtPct(s.totalReturnPct)}</p>
+      <p className={`total ${tone(stats.totalReturnPct)}`}>{fmtPct(stats.totalReturnPct)}</p>
 
       <dl className="stats">
         <div>
           <dt>Today</dt>
-          <dd className={tone(s.todayPct)}>{fmtPct(s.todayPct)}</dd>
+          <dd className={tone(stats.todayPct)}>{fmtPct(stats.todayPct)}</dd>
         </div>
         <div>
           <dt>Max DD</dt>
-          <dd>{fmtPct(s.maxDrawdownPct, 1)}</dd>
+          <dd>{fmtPct(stats.maxDrawdownPct, 1)}</dd>
         </div>
         <div>
           <dt>Equity</dt>
-          <dd>{fmtMoney(s.equity)}</dd>
+          <dd>{fmtMoney(stats.equity)}</dd>
         </div>
       </dl>
 
-      {spark.length > 1 && (
-        <div className="spark" aria-hidden="true">
-          <ResponsiveContainer width="100%" height={56}>
-            <LineChart data={spark} margin={{ top: 4, right: 2, bottom: 4, left: 2 }}>
-              <YAxis hide domain={["dataMin", "dataMax"]} />
-              <Line dataKey="spy" stroke="var(--muted)" strokeDasharray="4 3" dot={false} strokeWidth={1.5} isAnimationActive={false} />
-              <Line dataKey="you" stroke={s.person.color} dot={false} strokeWidth={2.5} isAnimationActive={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      )}
+      <div className="spark" aria-hidden="true">
+        <ResponsiveContainer width="100%" height={56}>
+          <LineChart data={rows} margin={{ top: 4, right: 2, bottom: 4, left: 2 }}>
+            <YAxis hide domain={[(min: number) => Math.min(min, 0), (max: number) => Math.max(max, 0)]} />
+            <ReferenceLine y={0} stroke="var(--muted)" strokeDasharray="4 3" />
+            <Line
+              dataKey={s.person.id}
+              stroke={s.person.color}
+              dot={false}
+              strokeWidth={2.5}
+              connectNulls
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
 
-      {s.strategy && <p className="strategy">{s.strategy}</p>}
+      {record && <p className="record">{record}</p>}
     </article>
   );
 }

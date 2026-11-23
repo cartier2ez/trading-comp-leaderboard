@@ -1,187 +1,215 @@
-// The data contract for bot reports. This file is the single source of truth:
-// BOT_GUIDE.md documents it, the `report` Edge Function enforces it.
+// The data contract for bot reports (schema v2). This file is the single source
+// of truth: BOT_GUIDE.md documents it, the `report` Edge Function enforces it.
 // Pure TypeScript, no Deno or Node APIs, so the web app's tests can run it.
 
 export type Account = "paper" | "live";
+export type BetResult = "won" | "lost" | "push";
 
 export interface SnapshotReport {
   type: "snapshot";
   account: Account;
   equity: number;
-  total_return_pct: number;
-  net_deposits: number;
+  open_positions: number | null;
+  settled_bets: number | null;
+  won_bets: number | null;
+  fees_paid: number | null;
+  sim_version: string | null;
 }
 
-export interface DailyReport {
-  type: "daily";
+export interface SettledBet {
+  market_slug: string;
+  market_title: string;
+  side: string;
+  stake: number;
+  pnl: number;
+  result: BetResult;
+  settled_at: string; // ISO, normalized to UTC milliseconds
+}
+
+export interface BetsReport {
+  type: "bets";
   account: Account;
-  date: string; // YYYY-MM-DD, the trading day this record closes
-  equity: number;
-  net_deposits: number;
-  day_return_pct: number;
-  total_return_pct: number;
-  benchmark: string;
-  benchmark_return_pct: number;
-  strategy: string | null;
-  tracking_since: string; // YYYY-MM-DD
+  bets: SettledBet[];
 }
 
-export type Report = SnapshotReport | DailyReport;
+export type Report = SnapshotReport | BetsReport;
 
-export type ValidationResult =
-  | { ok: true; report: Report }
-  | { ok: false; problems: string[] };
+export type ValidationResult = { ok: true; report: Report } | { ok: false; problems: string[] };
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+export const MAX_BETS_PER_REPORT = 50;
 
-const SNAPSHOT_FIELDS = ["type", "schema_version", "account", "equity", "total_return_pct", "net_deposits"];
-const DAILY_FIELDS = [
-  "type",
+/** A bet can't settle in the future; this only forgives a slightly fast clock. */
+const CLOCK_SKEW_MS = 2 * 60 * 1000;
+
+const SNAPSHOT_FIELDS = [
   "schema_version",
+  "type",
   "account",
-  "date",
   "equity",
-  "net_deposits",
-  "day_return_pct",
-  "total_return_pct",
-  "benchmark",
-  "benchmark_return_pct",
-  "excess_return_pct", // accepted for compatibility, not stored (it's derivable)
-  "strategy",
-  "tracking_since",
+  "open_positions",
+  "settled_bets",
+  "won_bets",
+  "fees_paid",
+  "sim_version",
 ];
+const BETS_FIELDS = ["schema_version", "type", "account", "bets"];
+const BET_FIELDS = ["market_slug", "market_title", "side", "stake", "pnl", "result", "settled_at"];
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_WITH_ZONE = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]/;
 
-function isRecord(v: unknown): v is Record<string, unknown> {
+type Obj = Record<string, unknown>;
+
+function isObj(v: unknown): v is Obj {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function parseDate(s: string): Date | null {
-  if (!DATE_RE.test(s)) return null;
+function isCalendarDate(s: string): boolean {
   const d = new Date(`${s}T00:00:00Z`);
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s ? d : null;
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+/** Field readers that collect readable problems instead of throwing. */
+function reader(obj: Obj, problems: string[], at: string) {
+  const name = (k: string) => `"${at}${k}"`;
+  return {
+    // Unknown fields are rejected: it keeps everyone's data identical in shape
+    // and stops open bets, account ids or keys from leaking in.
+    onlyFields(allowed: string[]) {
+      for (const key of Object.keys(obj)) {
+        if (!allowed.includes(key)) problems.push(`Unknown field ${name(key)}. Allowed: ${allowed.join(", ")}.`);
+      }
+    },
+    num(key: string, o: { min?: number; above?: number; max?: number }): number {
+      const v = obj[key];
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        problems.push(`${name(key)} must be a finite number${v === undefined ? " (it is required)" : ""}.`);
+        return 0;
+      }
+      if (o.min !== undefined && v < o.min) problems.push(`${name(key)} must be >= ${o.min}, got ${v}.`);
+      if (o.above !== undefined && v <= o.above) problems.push(`${name(key)} must be > ${o.above}, got ${v}.`);
+      if (o.max !== undefined && v > o.max) problems.push(`${name(key)} must be <= ${o.max}, got ${v}.`);
+      return v;
+    },
+    optionalNum(key: string, o: { min?: number; max?: number; integer?: boolean }): number | null {
+      if (obj[key] === undefined || obj[key] === null) return null;
+      const v = this.num(key, o);
+      if (o.integer && !Number.isInteger(v)) problems.push(`${name(key)} must be a whole number, got ${v}.`);
+      return v;
+    },
+    text(key: string, max: number, pattern?: RegExp): string {
+      const v = obj[key];
+      const s = typeof v === "string" ? v.trim() : "";
+      if (s.length === 0 || s.length > max || CONTROL.test(s) || (pattern && !pattern.test(s))) {
+        problems.push(
+          `${name(key)} must be text of 1-${max} characters${pattern ? ` matching ${pattern.source}` : " on one line"}.`,
+        );
+      }
+      return s;
+    },
+  };
 }
 
 export function validateReport(input: unknown, now: Date): ValidationResult {
-  const problems: string[] = [];
-  if (!isRecord(input)) {
-    return { ok: false, problems: ["Body must be a JSON object."] };
-  }
+  if (!isObj(input)) return { ok: false, problems: ["Body must be a JSON object."] };
 
-  const type = input.type;
-  if (type !== "snapshot" && type !== "daily") {
-    return { ok: false, problems: ['"type" must be "snapshot" or "daily".'] };
-  }
-
-  // Unknown fields are rejected: it keeps all three bots' data identical in
-  // shape, and stops account IDs or other details from leaking in.
-  const allowed = type === "snapshot" ? SNAPSHOT_FIELDS : DAILY_FIELDS;
-  for (const key of Object.keys(input)) {
-    if (!allowed.includes(key)) {
-      problems.push(`Unknown field "${key}". Allowed for ${type}: ${allowed.join(", ")}.`);
-    }
-  }
-
-  if (input.schema_version !== undefined && input.schema_version !== SCHEMA_VERSION) {
-    problems.push(`"schema_version" must be ${SCHEMA_VERSION} (or omitted).`);
-  }
-
-  const account = input.account;
-  if (account !== "paper" && account !== "live") {
-    problems.push('"account" must be "paper" or "live".');
-  }
-
-  const num = (key: string, opts: { required: boolean; min?: number; max?: number; exclusiveMin?: boolean }): number => {
-    const v = input[key];
-    if (v === undefined || v === null) {
-      if (opts.required) problems.push(`"${key}" is required (a number).`);
-      return 0;
-    }
-    if (typeof v !== "number" || !Number.isFinite(v)) {
-      problems.push(`"${key}" must be a finite number, got ${JSON.stringify(v)}.`);
-      return 0;
-    }
-    if (opts.min !== undefined && (opts.exclusiveMin ? v <= opts.min : v < opts.min)) {
-      problems.push(`"${key}" must be ${opts.exclusiveMin ? ">" : ">="} ${opts.min}, got ${v}.`);
-    }
-    if (opts.max !== undefined && v > opts.max) {
-      problems.push(`"${key}" must be <= ${opts.max}, got ${v}.`);
-    }
-    return v;
-  };
-
-  // Percentages are percent, not fractions: 1.25 means +1.25%.
-  const equity = num("equity", { required: true, min: 0, max: 1e9, exclusiveMin: true });
-  const totalReturn = num("total_return_pct", { required: true, min: -100, max: 100000 });
-  const netDeposits = num("net_deposits", { required: false, min: -1e9, max: 1e9 });
-
-  if (type === "snapshot") {
-    if (problems.length > 0) return { ok: false, problems };
+  if (input.schema_version !== SCHEMA_VERSION) {
     return {
-      ok: true,
-      report: {
-        type,
-        account: account as Account,
-        equity,
-        total_return_pct: totalReturn,
-        net_deposits: netDeposits,
-      },
+      ok: false,
+      problems: [
+        `"schema_version" must be ${SCHEMA_VERSION}. Version 1 (the stock competition) is closed; ` +
+          "update your bot using the current BOT_GUIDE.md.",
+      ],
     };
   }
-
-  const dayReturn = num("day_return_pct", { required: true, min: -100, max: 100000 });
-  const benchReturn = num("benchmark_return_pct", { required: true, min: -100, max: 100000 });
-
-  const dateStr = typeof input.date === "string" ? input.date : "";
-  const date = parseDate(dateStr);
-  if (!date) {
-    problems.push('"date" is required, as "YYYY-MM-DD".');
-  } else if (date.getTime() > now.getTime() + 24 * 3600 * 1000) {
-    problems.push(`"date" ${dateStr} is in the future.`);
+  if (input.type === "daily") {
+    return {
+      ok: false,
+      problems: ['There is no "daily" report in version 2. The server derives each day\'s close from your snapshots.'],
+    };
+  }
+  if (input.type !== "snapshot" && input.type !== "bets") {
+    return { ok: false, problems: ['"type" must be "snapshot" or "bets".'] };
   }
 
-  const sinceStr = typeof input.tracking_since === "string" ? input.tracking_since : "";
-  const since = parseDate(sinceStr);
-  if (!since) {
-    problems.push('"tracking_since" is required, as "YYYY-MM-DD" (the day you started tracking this account).');
-  } else if (date && since.getTime() > date.getTime()) {
-    problems.push('"tracking_since" can\'t be after "date".');
+  const problems: string[] = [];
+  const r = reader(input, problems, "");
+  r.onlyFields(input.type === "snapshot" ? SNAPSHOT_FIELDS : BETS_FIELDS);
+  if (input.account !== "paper" && input.account !== "live") {
+    problems.push('"account" must be "paper" (simulation) or "live" (real money).');
   }
+  const account = input.account as Account;
 
-  let benchmark = "SPY";
-  if (input.benchmark !== undefined) {
-    if (typeof input.benchmark !== "string" || !/^[A-Z.]{1,10}$/.test(input.benchmark)) {
-      problems.push('"benchmark" must be a ticker like "SPY".');
-    } else {
-      benchmark = input.benchmark;
+  if (input.type === "snapshot") {
+    const report: SnapshotReport = {
+      type: "snapshot",
+      account,
+      equity: r.num("equity", { min: 0, max: 1e9 }),
+      open_positions: r.optionalNum("open_positions", { min: 0, max: 1e6, integer: true }),
+      settled_bets: r.optionalNum("settled_bets", { min: 0, max: 1e6, integer: true }),
+      won_bets: r.optionalNum("won_bets", { min: 0, max: 1e6, integer: true }),
+      fees_paid: r.optionalNum("fees_paid", { min: 0, max: 1e9 }),
+      sim_version:
+        input.sim_version === undefined || input.sim_version === null
+          ? null
+          : r.text("sim_version", 40, /^[A-Za-z0-9._+-]+$/),
+    };
+    if (report.won_bets !== null) {
+      if (report.settled_bets === null) problems.push('"won_bets" needs "settled_bets" too.');
+      else if (report.won_bets > report.settled_bets) problems.push('"won_bets" can\'t be more than "settled_bets".');
     }
+    return problems.length > 0 ? { ok: false, problems } : { ok: true, report };
   }
 
-  let strategy: string | null = null;
-  if (input.strategy !== undefined && input.strategy !== null) {
-    if (typeof input.strategy !== "string" || input.strategy.length > 80) {
-      problems.push('"strategy" must be a string of at most 80 characters.');
-    } else {
-      strategy = input.strategy;
-    }
+  const list = input.bets;
+  if (!Array.isArray(list) || list.length === 0 || list.length > MAX_BETS_PER_REPORT) {
+    problems.push(`"bets" must be a list of 1-${MAX_BETS_PER_REPORT} settled bets.`);
+    return { ok: false, problems };
   }
+  const seen = new Set<string>();
+  const bets = list.map((raw: unknown, i): SettledBet | null => {
+    if (!isObj(raw)) {
+      problems.push(`"bets[${i}]" must be an object.`);
+      return null;
+    }
+    const at = `bets[${i}].`;
+    const b = reader(raw, problems, at);
+    b.onlyFields(BET_FIELDS);
+    const bet: SettledBet = {
+      market_slug: b.text("market_slug", 200, /^[A-Za-z0-9._-]+$/),
+      market_title: b.text("market_title", 200),
+      side: b.text("side", 60),
+      stake: b.num("stake", { above: 0, max: 1e9 }),
+      pnl: b.num("pnl", { min: -1e9, max: 1e9 }),
+      result: raw.result as BetResult,
+      settled_at: "",
+    };
+    if (bet.result !== "won" && bet.result !== "lost" && bet.result !== "push") {
+      problems.push(`"${at}result" must be "won", "lost" or "push".`);
+    }
+    if (bet.result === "lost" && bet.pnl > 0) problems.push(`"${at}pnl" can't be positive for a lost bet.`);
+    if (bet.pnl < -bet.stake - 0.01) problems.push(`"${at}pnl" can't lose more than the stake (stake includes fees).`);
+
+    const when = typeof raw.settled_at === "string" ? raw.settled_at : "";
+    const match = ISO_WITH_ZONE.exec(when);
+    const ms = match && isCalendarDate(match[1]!) ? Date.parse(when) : NaN;
+    if (Number.isNaN(ms)) {
+      problems.push(`"${at}settled_at" must be a date-time with a time zone, like "2026-12-03T18:20:00Z".`);
+      return null;
+    }
+    if (ms > now.getTime() + CLOCK_SKEW_MS) {
+      problems.push(`"${at}settled_at" is in the future. Only send bets that are finished.`);
+    }
+    bet.settled_at = new Date(ms).toISOString();
+
+    const key = JSON.stringify([bet.market_slug, bet.side, bet.settled_at]);
+    if (seen.has(key)) problems.push(`"bets[${i}]" repeats a bet (same market_slug, side and settled_at).`);
+    seen.add(key);
+    return bet;
+  });
 
   if (problems.length > 0) return { ok: false, problems };
-  return {
-    ok: true,
-    report: {
-      type,
-      account: account as Account,
-      date: dateStr,
-      equity,
-      net_deposits: netDeposits,
-      day_return_pct: dayReturn,
-      total_return_pct: totalReturn,
-      benchmark,
-      benchmark_return_pct: benchReturn,
-      strategy,
-      tracking_since: sinceStr,
-    },
-  };
+  return { ok: true, report: { type: "bets", account, bets: bets.filter((b) => b !== null) } };
 }

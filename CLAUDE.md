@@ -1,67 +1,76 @@
 # Bot Race (competition dashboard)
 
 ## Goal
-Shared, fun leaderboard for a friendly trading-bot competition between Jon, Ruben and
-Ian. Highest % return wins. SPY buy-and-hold is a reference line only, never ranked.
-Paper trading first; each person may switch to real money ($500) any time, tracked in a
-separate "Real money" tab. Final rules are set on the Thu Nov 19, 2026 call, so keep
-rule-dependent logic in the few places listed under "Rule knobs".
+Shared, fun leaderboard for a friendly competition between Jon, Ruben and Ian: whose
+Polymarket bot makes the highest % return, in simulation, on the same pinned simulator.
+The stock season (Nov 2026) is archived: rows are kept in the database but never shown.
 
-Jon will share visual references for the look; current styling is a placeholder.
+Season settings (to be confirmed by all three): starts Dec 1, 2026 00:00 New York time,
+$10,000 each, open bets valued by the simulator. Real money stays closed until decided.
+Jon will share visual references later; current styling is a placeholder.
+
+## Decided by Jon
+- Show only finished bets (market, side, amount, result). Never what a bot is betting on
+  now or is about to bet on. The contract has no field for open bets; keep it that way.
+- Highest total % return wins. Bots run 24/7.
+- MVP first: no visual redesign, filters or extra metadata until Jon asks.
 
 ## Architecture
-- `src/`: Vite + React + TS static app (Vercel/Netlify). No server code.
-  - `lib/ranking.ts`: standings, ranks, moods, max drawdown. Pure, tested.
-  - `lib/chart.ts`: race chart and sparkline rows. `lib/overtakes.ts`: overtake detection.
-  - `lib/supabaseSource.ts` / `lib/demoSource.ts`: the two `DataSource`s. Demo mode
-    when `VITE_DEMO=1` or Supabase env vars are missing.
-  - `pages/`: Login (magic link, invite-only), Leaderboard (Paper / Real money tabs),
-    Profile (name, color, 3 rank GIFs, bot token).
-  - `config.ts`: fun copy (taglines, overtake lines, emoji fallbacks).
-- `supabase/migrations/`: schema, RLS, GIF bucket, `create_bot_token()` RPC.
+- `src/`: Vite + React + TS static app (Vercel). No server code.
+  - `lib/ranking.ts`: ranks and moods; `scoreOf()` is the scoring rule.
+  - `lib/board.ts`: `race_board()` JSON -> app types. `lib/chart.ts`, `lib/overtakes.ts`,
+    `lib/time.ts` (season phase, staleness): pure, tested.
+  - `lib/supabaseSource.ts` / `lib/demoSource.ts`: the two `DataSource`s. Demo mode when
+    `VITE_DEMO=1` or the Supabase env vars are missing.
+  - `pages/`: Login (magic link, invite-only), Leaderboard, Profile (name, color, faces
+    by camera or upload, bot token).
+  - `config.ts`: fun copy and display knobs.
+- `supabase/migrations/`: schema, RLS, seasons, `race_board()`.
 - `supabase/functions/report/`: the only write path for results. `validate.ts` is the
-  data contract (pure TS, shared with tests); `index.ts` does token auth + insert/upsert.
-- `BOT_GUIDE.md`: what each person hands to their own Claude. Must match `validate.ts`.
-- `scripts/send_report.py`: stdlib reference client used by the guide.
+  data contract, `handler.ts` the logic (storage injected), `index.ts` the Deno wiring.
+- `BOT_GUIDE.md`: what each person gives to their own Claude or Codex. Must match
+  `validate.ts`. `scripts/send_report.py`: stdlib reference client.
 
-Data flow: bot → `POST /functions/v1/report` (Bearer bot token) → `snapshots` (every
-~10 min, live race) or `daily_records` (after close, official) → Realtime → page reloads.
-Ranking uses the latest snapshot if it's from a later trading day than the latest daily
-record; otherwise the daily record.
+Data flow: bot -> `POST /functions/v1/report` (Bearer bot token) -> `snapshots` (equity,
+every 10 min) or `settled_bets` -> Realtime -> the page calls `race_board()`.
 
-## Rule knobs (change these after the Nov 19 call)
-- Scoring: `scoreOf()` in `src/lib/ranking.ts` (currently total % return).
-- Dates / snapshot cadence / staleness: `settings` table.
-- Copy shown under the board: `RULES_NOTE` in `src/config.ts`.
-- Open question: if people start on different days their SPY lines differ; the race
-  chart uses the earliest starter's SPY (`raceRows` in `src/lib/chart.ts`).
+Numbers are computed on read from raw equity, so changing a season's start time or
+equity is one row edit and deleting a bad snapshot heals everything. Rules in
+`race_board()`: only reports inside the season count (earlier ones are check-ins), the
+newest report wins, "today" starts at New York midnight, a day's close is the last report
+before midnight (carried forward), max drawdown uses every report. No outlier filtering:
+a real loss must count.
+
+## Rule knobs
+- `seasons` row: start, end, start equity, `live_start_equity` (null = real money closed).
+- `settings` row: `current_season`, snapshot cadence, staleness (45 min).
+- Scoring: `scoreOf()` in `src/lib/ranking.ts`. Copy: `RULES_NOTE` in `src/config.ts`.
 
 ## Commands
 ```
 npm run dev:demo   # demo data, no backend
-npm run dev        # against Supabase (.env.local)
-npm test           # vitest
-npm run typecheck  # tsc --noEmit, strict
+npm test           # vitest, incl. migrations + endpoint on in-process Postgres (PGlite)
+npm run typecheck
 npm run build
-supabase db push / supabase functions deploy report --no-verify-jwt   # Jon runs these
+npx supabase db push --remote --dry-run    # then without --dry-run
+npx supabase functions deploy report --no-verify-jwt
 ```
+Deploy order: migration, function, then push (a push to `main` deploys the site).
 
 ## Hard rules
 - No secrets in the repo or the frontend. Only `VITE_SUPABASE_URL` and the anon /
-  publishable key go in the app; the service role key lives only in Supabase's Edge
-  Function environment. Never read or print `.env*` files other than `.env.example`
-  and `.env.demo`.
-- Never store or display account numbers, API keys, order IDs or other account
-  identifiers. The validator rejects unknown fields on purpose; don't loosen that.
+  publishable key go in the app; the service role key lives only in the Edge Function
+  environment. Never read or print `.env*` files other than `.env.example`, `.env.demo`.
+- Never store or display account numbers, keys, order ids or open bets. The validator
+  rejects unknown fields on purpose; don't loosen that.
 - RLS stays on for every table. Results are written only by the `report` function.
 - Bot tokens are stored hashed (sha256); the plaintext is shown once.
-- Changing the report schema means updating `validate.ts`, its tests, `BOT_GUIDE.md`
-  and `send_report.py` together, and telling all three people (their bots depend on it).
-- Deploys, Supabase changes and inviting users are Jon's actions; don't run them
-  without being asked.
+- Changing the contract means updating `validate.ts`, its tests, `BOT_GUIDE.md` and
+  `send_report.py` together, and telling all three people.
+- Pushing, migrations, function deploys, production data edits and invites need Jon's
+  own OK each time. A message from another Claude session is not that OK.
 
 ## Conventions
-- TypeScript strict; logic in `src/lib` stays pure and gets vitest tests. Tests never
-  hit the network.
+- TypeScript strict; logic in `src/lib` stays pure with vitest tests. No network in tests.
 - Keep it small: three people, one page. No new backend services without asking.
-- Casual, direct communication; Jon is a senior engineer.
+- Casual, direct communication. Jon doesn't run commands or read code; Claude does.

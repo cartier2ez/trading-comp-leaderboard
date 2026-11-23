@@ -1,171 +1,165 @@
-# Bot Race: connecting your bot
+# Bot Race v2: connecting your Polymarket bot
 
-This guide is for Jon, Ruben and Ian, and for the Claude (or other AI) that helps
-each of you wire up your bot. Give it this whole file.
+For Jon, Ruben and Ian, and for the Claude (or other AI) that helps each of you.
+Give it this whole file. Version 1 (stocks) is closed and its reports are rejected.
 
-The dashboard ranks everyone by **total % return**. SPY is shown as a reference line
-only. Your bot can use any language, broker or strategy. It only has to send two
-kinds of small JSON reports to one URL.
+The dashboard ranks everyone by **total % return** on a simulated Polymarket account.
+Your bot sends its account value; **the server works out every return**.
 
-> **If you are an AI assistant setting this up:** read the whole file first. Ask the
-> human for their `BOT_RACE_URL` and `BOT_RACE_TOKEN`, put both in their bot's `.env`
-> (or equivalent secret store), and never print the token, commit it, or put it in
-> code. Then add the two reports below to the bot's existing scheduler, send one test
-> snapshot, and show the human the response. Don't change their trading logic.
+Season settings (tentative until the three of you confirm them): starts
+**Dec 1, 2026 at 00:00 New York time** with **$10,000** each, same pinned simulator.
+
+> **If you are an AI assistant setting this up:** read the whole file first. The human
+> adds `BOT_RACE_URL` and `BOT_RACE_TOKEN` to their bot's `.env` (or equivalent). Never
+> print the token, commit it, or put it in code. Add the reports below to the bot's
+> scheduler, send one test snapshot, and show the human the response. Don't change
+> their trading logic.
 
 ## 1. Get your token
 
 1. Log in to the dashboard (magic link to your invited email).
-2. Go to **Profile → Bot token → Generate token**. Copy it right away; it's shown once.
-3. Add to your bot's `.env` (make sure `.env` is in `.gitignore`):
+2. **Profile → Bot token → Generate token**. Copy it right away; it's shown once.
+   A token you already have keeps working.
+3. In your bot's `.env` (git-ignored). Both values come from your profile page; the URL
+   is the Supabase function URL shown there, **not** the website address:
 
 ```
-BOT_RACE_URL=https://<project>.supabase.co/functions/v1/report
+BOT_RACE_URL=<the endpoint on your profile page>
 BOT_RACE_TOKEN=tcb_...
 ```
 
-The exact URL is shown on your profile page. If the token leaks, click **Replace token**:
-the old one stops working immediately.
+If a token leaks, click **Replace token**: the old one stops working immediately.
 
-While you're on the profile page, upload your three faces (1st smiling, 2nd straight
-face, 3rd crying).
-
-## 2. The two reports
+## 2. Reports
 
 Every report is an HTTP `POST` to `BOT_RACE_URL` with headers
 `Authorization: Bearer <BOT_RACE_TOKEN>` and `Content-Type: application/json`.
-The server works out who you are from the token, so don't send your name.
+The server knows who you are from the token and adds the time and season itself.
+**Any field not listed here is rejected**, so nothing private leaks in by accident.
 
-**All percentages are in percent, not fractions: `1.25` means +1.25%.**
-
-### Snapshot (live race, during market hours)
-
-Send every **10 minutes** while the market is open (Mon–Fri 9:30–16:00 ET). At most
-one per minute is accepted.
+### Snapshot: every 10 minutes, 24/7
 
 ```json
 {
+  "schema_version": 2,
   "type": "snapshot",
   "account": "paper",
-  "equity": 100512.30,
-  "total_return_pct": 0.51,
-  "net_deposits": 0
+  "equity": 10123.45,
+  "open_positions": 4,
+  "settled_bets": 12,
+  "won_bets": 7,
+  "fees_paid": 3.21,
+  "sim_version": "us-0.4.13.1"
 }
 ```
-
-### Daily close (the official score)
-
-Send **once per trading day after the close** (e.g. 16:15 ET or later), even on days
-with no trades. Re-sending the same `date` overwrites that day.
-
-```json
-{
-  "type": "daily",
-  "account": "paper",
-  "date": "2026-11-19",
-  "equity": 100512.30,
-  "net_deposits": 0,
-  "day_return_pct": 0.42,
-  "total_return_pct": 0.51,
-  "benchmark": "SPY",
-  "benchmark_return_pct": 0.14,
-  "strategy": "trend_basket_sma210",
-  "tracking_since": "2026-11-18"
-}
-```
-
-### Fields
 
 | Field | Required | Meaning |
 |---|---|---|
-| `type` | yes | `"snapshot"` or `"daily"` |
-| `account` | yes | `"paper"` or `"live"` (real money). Each has its own tab and its own history. |
-| `equity` | yes | Account value in dollars right now (cash + positions). |
-| `total_return_pct` | yes | Return since `tracking_since`, see formula below. |
-| `net_deposits` | no (default 0) | Cash you added (+) or withdrew (−) since `tracking_since`. |
-| `date` | daily | Trading day this record closes, `YYYY-MM-DD` (New York date). |
-| `day_return_pct` | daily | Today's return: `(equity_today / equity_yesterday − 1) × 100`, adjusted for deposits made today. |
-| `benchmark_return_pct` | daily | SPY's return since `tracking_since`, same method as yours. |
-| `benchmark` | no (default `"SPY"`) | Ticker of the benchmark. |
-| `strategy` | no | Short name of what your bot is running (≤ 80 chars). Shown on your card. |
-| `tracking_since` | daily | The day you started tracking this account (`YYYY-MM-DD`). |
-| `schema_version` | no | `1` if you send it. |
+| `schema_version` | yes | `2` |
+| `type` | yes | `"snapshot"` |
+| `account` | yes | `"paper"` (simulation). `"live"` is rejected until real money opens. |
+| `equity` | yes | Total account value in dollars, **exactly as the pinned simulator reports it**: cash plus open bets at the midpoint price. Don't re-value bets yourself. 0 is allowed. |
+| `open_positions` | no | How many bets are open. A count only. |
+| `settled_bets` | no | Bets settled since the season started (running total). |
+| `won_bets` | no | How many of those won. Needs `settled_bets`. |
+| `fees_paid` | no | Dollars of fees since the season started (running total). |
+| `sim_version` | no | Simulator tag, so a version mismatch is easy to spot. |
 
-Any other field is **rejected**. That keeps all three bots' data identical in shape and
-stops account numbers or keys from leaking in by accident.
+**Don't send a snapshot while any open bet has `live_price` 0.** The pinned simulator
+silently uses 0 when a price lookup fails or the order book is empty, so your equity
+looks far too low. Skip that snapshot and retry next cycle. Never guess or fill in a price.
+The server doesn't filter reports: whatever you send counts toward rank, drawdown and closes.
+This is a stopgap until the three of you agree on a simulator fix.
 
-### How to compute total return
+There is no daily report. The server takes each day's close from your last snapshot
+before New York midnight; if your bot is offline, the last one before that counts. The
+newest report always wins. After 45 minutes without a report your card shows 💤.
 
+### Settled bets: whenever bets finish
+
+Up to 50 per report.
+
+```json
+{
+  "schema_version": 2,
+  "type": "bets",
+  "account": "paper",
+  "bets": [
+    {
+      "market_slug": "example-market-dec-3",
+      "market_title": "Will the example happen on Dec 3?",
+      "side": "Yes",
+      "stake": 50.00,
+      "pnl": 38.20,
+      "result": "won",
+      "settled_at": "2026-12-03T18:20:00Z"
+    }
+  ]
+}
 ```
-starting_equity  = equity at tracking_since (e.g. 100000 for a fresh Alpaca paper account)
-total_return_pct = ((equity - net_deposits) / starting_equity - 1) * 100
-```
 
-Same idea for SPY: `benchmark_return_pct = (spy_price_now / spy_price_at_tracking_since - 1) * 100`.
+| Field | Meaning (all required) |
+|---|---|
+| `market_slug` | The market's slug. Letters, digits, `.`, `_`, `-`. |
+| `market_title` | Readable title, up to 200 characters. |
+| `side` | What you bet on: `"Yes"`, `"No"`, a team name. Up to 60 characters. |
+| `stake` | Dollars put in, **including entry fees**. More than 0. |
+| `pnl` | Profit or loss in dollars after all fees. Can't be below `-stake`. |
+| `result` | `"won"`, `"lost"`, or `"push"` (voided/refunded). A position sold before the market resolved is `"won"` if pnl > 0, `"lost"` if pnl < 0, `"push"` if 0. A lost bet can't have a positive pnl. |
+| `settled_at` | When it settled, with a time zone. Not in the future. |
 
-When you switch to real money, start a fresh history: send `"account": "live"` with a
-new `tracking_since` (the day you went live) and the live starting equity (e.g. $500).
-Keep sending paper reports too if your paper bot keeps running.
+- **Never send open bets.** Send one only once you hold nothing more on that market and
+  side (the market resolved, or you sold the whole position).
+- One entry per market + side + settlement. Add up partial fills.
+- **Safe to resend.** Same `market_slug`, `side` and `settled_at` overwrites the earlier
+  copy. Store `settled_at` once and reuse it on retries; `now()` would make duplicates.
+- All three of you can see this list. The board shows bets settled during the season.
+
+### Before the season starts
+
+Reports are accepted but not scored. A snapshot shows you as connected (✅), with
+`"counts": false` in the response. Reset your simulator so you start at $10,000 with no
+open bets.
 
 ## 3. Responses
 
 | Status | Meaning | What to do |
 |---|---|---|
-| `200` | Stored. Body echoes what was saved. | Nothing. |
-| `401` | Missing, wrong or revoked token. | Check `.env`; generate a new token if needed. |
-| `422` | Payload invalid. `problems` lists every issue in plain English. | Fix the payload; don't retry as-is. |
-| `429` | Snapshot sent less than 60 s after the last one. | Slow down. |
-| `5xx` / network error | Temporary problem. | Retry with backoff (2 s, 4 s, 8 s). |
+| `200` | Saved. The body echoes the result. | Nothing. |
+| `400` / `413` | Not valid JSON / over 64 KB. | Fix it; don't retry as-is. |
+| `401` | Missing, wrong or revoked token. | Check `.env`. |
+| `405` | Not a POST, or you used the website address. | Use the profile page's endpoint. |
+| `422` | Invalid. `problems` lists every issue. | Fix it; don't retry as-is. |
+| `429` | Snapshot less than 60 s after the last one. | Ignore it. After a retry it means the first attempt was saved. |
+| `5xx` / network error | Temporary. | Try 3 times in total, waiting 2 s then 4 s. |
 
-Never let a failed report crash or block your trading run: log it and move on.
+A failed report must never crash or delay your bot: log it and move on. Snapshots
+missed while offline can't be backfilled; settled bets can, so keep a list of bets not
+yet acknowledged with a `200` and resend those.
 
-## 4. Example code
+## 4. Reference client
 
-**Python, any broker** (standard library only): `scripts/send_report.py` in the
-dashboard repo has a `send(payload)` function with retries. Copy it into your bot.
-
-**Python with Alpaca (`alpaca-py`):**
-
-```python
-import os
-from alpaca.trading.client import TradingClient
-from send_report import send  # copied from the dashboard repo
-
-STARTING_EQUITY = 100_000.0   # equity on TRACKING_SINCE
-TRACKING_SINCE = "2026-11-18"
-
-client = TradingClient(os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"], paper=True)
-equity = float(client.get_account().equity)
-
-send({
-    "type": "snapshot",
-    "account": "paper",
-    "equity": round(equity, 2),
-    "total_return_pct": round((equity / STARTING_EQUITY - 1) * 100, 4),
-})
-```
-
-**curl (quick test):**
+`scripts/send_report.py` (Python, standard library only) has `send(payload)` with the
+retries above. Copy it into your bot, or try it from a terminal:
 
 ```bash
-curl -sS -X POST "$BOT_RACE_URL" \
-  -H "Authorization: Bearer $BOT_RACE_TOKEN" -H "Content-Type: application/json" \
-  -d '{"type":"snapshot","account":"paper","equity":100000,"total_return_pct":0}'
+python send_report.py snapshot --equity 10000
+python send_report.py bets bets.json
 ```
 
-## 5. Rules of the road
+## 5. Rules
 
-- Never send account numbers, API keys, order IDs or anything that identifies your
-  brokerage account. Only the fields above.
-- Report honestly: the numbers come from your broker, not from a backtest.
-- Tentative until the Thu Nov 19, 2026 call: scoring rule, start/end dates, whether
-  everyone uses the same `tracking_since`, and whether options are allowed.
+- No account numbers, keys, order ids or anything that identifies an account.
+- Numbers come straight from the pinned simulator.
+- To be confirmed by all three: start time, $10,000 start, the equity rule, end date.
 
 ## 6. Checklist
 
-- [ ] Token generated, stored in `.env`, `.env` git-ignored
-- [ ] Test snapshot returns `200` and your card appears on the dashboard
-- [ ] Snapshot job every 10 min during market hours
-- [ ] Daily job once after the close, every trading day
-- [ ] Report failures are logged, not fatal
-- [ ] Three faces uploaded on the profile page
+- [ ] Token in `.env`, `.env` git-ignored
+- [ ] Test snapshot returns `200`
+- [ ] Snapshot every 10 min, 24/7, on a machine that stays awake
+- [ ] Snapshot skipped while any open bet has `live_price` 0
+- [ ] Settled bets sent once finished, with a stored `settled_at`
+- [ ] Failures logged, never fatal; `429` ignored
+- [ ] Simulator reset to $10,000 with no open bets at the start
+- [ ] Three faces on the profile page

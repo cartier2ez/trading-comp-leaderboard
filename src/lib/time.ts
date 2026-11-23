@@ -1,23 +1,39 @@
+import type { Season } from "./types";
+
 const ET = "America/New_York";
 
-/** Trading-day date (YYYY-MM-DD) of an instant, in New York time. */
+/** Calendar date (YYYY-MM-DD) of an instant, in New York time. */
 export function etDate(d: Date): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: ET, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 }
 
-/** Regular US market hours, Mon-Fri 9:30-16:00 ET. Ignores holidays (fine for a "live" badge). */
-export function isMarketOpen(d: Date): boolean {
-  const parts = new Intl.DateTimeFormat("en-US", {
+/** "Dec 1, 12:00 AM EST" */
+export function etDateTime(iso: string): string {
+  return new Intl.DateTimeFormat("en-US", {
     timeZone: ET,
-    weekday: "short",
-    hour: "2-digit",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
     minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-  if (get("weekday") === "Sat" || get("weekday") === "Sun") return false;
-  const minutes = Number(get("hour")) * 60 + Number(get("minute"));
-  return minutes >= 9 * 60 + 30 && minutes < 16 * 60;
+    timeZoneName: "short",
+  }).format(new Date(iso));
+}
+
+export type SeasonPhase = "before" | "running" | "over";
+
+export function seasonPhase(season: Season, now: Date): SeasonPhase {
+  if (now.getTime() < Date.parse(season.startsAt)) return "before";
+  if (season.endsAt !== null && now.getTime() >= Date.parse(season.endsAt)) return "over";
+  return "running";
+}
+
+/** "8 days", "5 h", "12 min" until an instant. */
+export function timeUntil(iso: string, now: Date): string {
+  const m = Math.max(1, Math.ceil((Date.parse(iso) - now.getTime()) / 60_000));
+  if (m < 60) return `${m} min`;
+  const h = Math.ceil(m / 60);
+  if (h < 48) return `${h} h`;
+  return `${Math.ceil(h / 24)} days`;
 }
 
 export function relativeTime(iso: string | null, now: Date): string {
@@ -29,4 +45,10 @@ export function relativeTime(iso: string | null, now: Date): string {
   const h = Math.round(m / 60);
   if (h < 36) return `${h} h ago`;
   return `${Math.round(h / 24)} days ago`;
+}
+
+/** No report for too long while the season is running (bets run 24/7). */
+export function isStale(lastSeen: string | null, season: Season, staleAfterMinutes: number, now: Date): boolean {
+  if (lastSeen === null || seasonPhase(season, now) !== "running") return false;
+  return now.getTime() - Date.parse(lastSeen) > staleAfterMinutes * 60_000;
 }

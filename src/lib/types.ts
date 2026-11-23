@@ -9,38 +9,63 @@ export interface Person {
   gifs: Partial<Record<Mood, string>>;
 }
 
-export interface Snapshot {
-  personId: string;
-  account: Account;
-  ts: string; // ISO timestamp
-  equity: number;
-  totalReturnPct: number;
+export interface Season {
+  id: string;
+  name: string;
+  startsAt: string; // ISO timestamp
+  endsAt: string | null;
+  startEquity: number;
 }
 
-export interface DailyRecord {
+/** One person's current numbers in one account, computed by the server. */
+export interface Stats {
+  personId: string;
+  account: Account;
+  lastSeen: string; // ISO timestamp of the newest counted report
+  equity: number;
+  totalReturnPct: number;
+  todayPct: number; // since New York midnight
+  maxDrawdownPct: number; // <= 0
+  openPositions: number | null;
+  settledBets: number | null;
+  wonBets: number | null;
+  feesPaid: number | null;
+}
+
+/** Total return at New York midnight ending `date`. */
+export interface DayClose {
   personId: string;
   account: Account;
   date: string; // YYYY-MM-DD
-  equity: number;
-  dayReturnPct: number;
   totalReturnPct: number;
-  benchmarkReturnPct: number;
-  strategy: string | null;
-  trackingSince: string;
-  receivedAt: string; // ISO timestamp
+}
+
+/** A finished bet. Open bets are never sent to the dashboard. */
+export interface SettledBet {
+  personId: string;
+  account: Account;
+  marketSlug: string;
+  marketTitle: string;
+  side: string;
+  stake: number;
+  pnl: number;
+  result: "won" | "lost" | "push";
+  settledAt: string;
 }
 
 export interface Settings {
-  competitionStart: string | null;
-  competitionEnd: string | null;
   snapshotMinutes: number;
   staleAfterMinutes: number;
 }
 
 export interface Dataset {
   people: Person[];
-  snapshots: Snapshot[];
-  daily: DailyRecord[];
+  season: Season;
+  stats: Stats[];
+  closes: DayClose[];
+  bets: SettledBet[]; // newest first
+  /** Latest report before the season started (connection tests, not scored). */
+  checkIns: { personId: string; at: string }[];
   settings: Settings;
 }
 

@@ -21,7 +21,8 @@ export const OVERTAKE_LINES = [
 ];
 
 export const RULES_NOTE =
-  "Ranked by total % return. SPY is a reference line (did the bot beat doing nothing?), not a competitor.";
+  "Ranked by total % return since the season started. Open bets count at the simulator's midpoint price. " +
+  "Only settled bets are shown; nobody can see open ones.";
 
 /** How long the page waits without realtime events before re-fetching anyway. */
 export const FALLBACK_POLL_MS = 5 * 60 * 1000;

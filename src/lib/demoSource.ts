@@ -1,11 +1,15 @@
-// Demo mode: three fake bots with 30 days of history and a live tick every few
-// seconds, so you can watch ranks shuffle without a Supabase project.
+// Demo mode: three fake bots 12 days into a season, with a live tick every few
+// seconds, so you can watch ranks shuffle without a Supabase project. All
+// markets and results here are made up.
 
 import { loadDemoFaces } from "./faceStore";
 import { etDate } from "./time";
-import type { DailyRecord, DataSource, Dataset, Person, Snapshot } from "./types";
+import type { DataSource, Dataset, DayClose, Person, SettledBet, Stats } from "./types";
 
 const TICK_MS = 3500;
+const DAYS = 12;
+const START = 10_000;
+const DAY_MS = 86_400_000;
 
 function mulberry32(seed: number): () => number {
   let a = seed;
@@ -21,131 +25,126 @@ function gaussian(rand: () => number): number {
   return Math.sqrt(-2 * Math.log(1 - rand())) * Math.cos(2 * Math.PI * rand());
 }
 
-/** The last `n` weekdays strictly before today (ET). */
-function pastTradingDays(n: number, now: Date): string[] {
-  const days: string[] = [];
-  const d = new Date(`${etDate(now)}T12:00:00Z`);
-  while (days.length < n) {
-    d.setUTCDate(d.getUTCDate() - 1);
-    const wd = d.getUTCDay();
-    if (wd !== 0 && wd !== 6) days.unshift(d.toISOString().slice(0, 10));
-  }
-  return days;
-}
-
-/** Random daily returns (in %) nudged so the path ends at `targetPct`. */
-function path(rand: () => number, n: number, volPct: number, targetPct: number): number[] {
-  const logs = Array.from({ length: n }, () => Math.log(1 + (gaussian(rand) * volPct) / 100));
-  const fix = (Math.log(1 + targetPct / 100) - logs.reduce((a, b) => a + b, 0)) / n;
-  return logs.map((l) => (Math.exp(l + fix) - 1) * 100);
-}
-
-const PEOPLE: (Person & { strategy: string; vol: number; target: number })[] = [
-  { id: "demo-jon", displayName: "Jon", color: "#f97316", gifs: {}, strategy: "trend_basket_sma210", vol: 1.0, target: 3.4 },
-  { id: "demo-ruben", displayName: "Ruben", color: "#3b82f6", gifs: {}, strategy: "momentum_yolo", vol: 1.6, target: 2.9 },
-  { id: "demo-ian", displayName: "Ian", color: "#22c55e", gifs: {}, strategy: "mean_reversion_v2", vol: 0.8, target: 3.8 },
+const PEOPLE: (Person & { vol: number; target: number })[] = [
+  { id: "demo-jon", displayName: "Jon", color: "#f97316", gifs: {}, vol: 1.2, target: 3.4 },
+  { id: "demo-ruben", displayName: "Ruben", color: "#3b82f6", gifs: {}, vol: 1.8, target: 2.9 },
+  { id: "demo-ian", displayName: "Ian", color: "#22c55e", gifs: {}, vol: 1.0, target: 3.8 },
 ];
 
-function buildHistory(now: Date): Dataset {
-  const rand = mulberry32(42);
-  const days = pastTradingDays(30, now);
-  const spy = path(rand, days.length, 0.8, 2.2);
-  const spyTotals: number[] = [];
-  spy.reduce((w, r) => {
-    const next = w * (1 + r / 100);
-    spyTotals.push((next - 1) * 100);
-    return next;
-  }, 1);
+const MARKETS = [
+  "Will it rain in Seattle on Friday?",
+  "Home team wins Saturday's game?",
+  "Snow in Denver before Sunday?",
+  "Total goals over 2.5 tonight?",
+  "Will the launch happen this week?",
+  "Highest temperature in Austin above 70°F?",
+];
 
-  const daily: DailyRecord[] = [];
-  for (const p of PEOPLE) {
-    let wealth = 1;
-    path(rand, days.length, p.vol, p.target).forEach((r, i) => {
-      wealth *= 1 + r / 100;
-      daily.push({
-        personId: p.id,
-        account: "paper",
-        date: days[i]!,
-        equity: 100000 * wealth,
-        dayReturnPct: r,
-        totalReturnPct: (wealth - 1) * 100,
-        benchmarkReturnPct: spyTotals[i]!,
-        strategy: p.strategy,
-        trackingSince: days[0]!,
-        receivedAt: `${days[i]}T21:20:00Z`,
-      });
-    });
-  }
-
-  // Jon went live 4 days ago with $500; the others haven't yet.
-  const liveDays = days.slice(-4);
-  const spyBase = 1 + (spyTotals[spyTotals.length - 5] ?? 0) / 100;
-  let wealth = 1;
-  path(rand, liveDays.length, 1.0, 0.9).forEach((r, i) => {
-    wealth *= 1 + r / 100;
-    daily.push({
-      personId: "demo-jon",
-      account: "live",
-      date: liveDays[i]!,
-      equity: 500 * wealth,
-      dayReturnPct: r,
-      totalReturnPct: (wealth - 1) * 100,
-      benchmarkReturnPct: ((1 + spyTotals[spyTotals.length - 4 + i]! / 100) / spyBase - 1) * 100,
-      strategy: "trend_basket_sma210",
-      trackingSince: liveDays[0]!,
-      receivedAt: `${liveDays[i]}T21:20:00Z`,
-    });
-  });
-
-  // A few snapshots from earlier "today" so the race starts mid-session.
-  const snapshots: Snapshot[] = [];
-  for (const p of PEOPLE) {
-    const last = daily.filter((d) => d.personId === p.id && d.account === "paper").at(-1)!;
-    let total = last.totalReturnPct;
-    for (let k = 5; k >= 0; k--) {
-      total += gaussian(rand) * 0.3;
-      snapshots.push({
-        personId: p.id,
-        account: "paper",
-        ts: new Date(now.getTime() - k * 10 * 60 * 1000).toISOString(),
-        equity: 100000 * (1 + total / 100),
-        totalReturnPct: total,
-      });
-    }
-  }
-
+function fakeBet(rand: () => number, at: number): SettledBet {
+  const person = PEOPLE[Math.floor(rand() * PEOPLE.length)]!;
+  const n = Math.floor(rand() * MARKETS.length);
+  const stake = Math.round(20 + rand() * 180);
+  const roll = rand();
+  const result = roll < 0.5 ? "won" : roll < 0.95 ? "lost" : "push";
   return {
-    people: PEOPLE.map(({ id, displayName, color, gifs }) => ({ id, displayName, color, gifs })),
-    daily,
-    snapshots,
-    settings: { competitionStart: null, competitionEnd: null, snapshotMinutes: 10, staleAfterMinutes: 30 },
+    personId: person.id,
+    account: "paper",
+    marketSlug: `demo-market-${n}`,
+    marketTitle: MARKETS[n]!,
+    side: rand() < 0.5 ? "Yes" : "No",
+    stake,
+    pnl: result === "won" ? Math.round(stake * (0.4 + rand())) : result === "lost" ? -stake : 0,
+    result,
+    settledAt: new Date(at).toISOString(),
   };
 }
 
 export function demoSource(): DataSource {
-  const state = buildHistory(new Date());
+  const rand = mulberry32(42);
+  const now = Date.now();
+  const closes: DayClose[] = [];
+  const peaks = new Map<string, number>();
+  const stats: Stats[] = PEOPLE.map((p) => {
+    const logs = Array.from({ length: DAYS }, () => (gaussian(rand) * p.vol) / 100);
+    const fix = (Math.log(1 + p.target / 100) - logs.reduce((a, b) => a + b, 0)) / DAYS;
+    let wealth = 1;
+    let peak = 1;
+    let dd = 0;
+    logs.forEach((l, i) => {
+      wealth *= Math.exp(l + fix);
+      peak = Math.max(peak, wealth);
+      dd = Math.min(dd, wealth / peak - 1);
+      closes.push({
+        personId: p.id,
+        account: "paper",
+        date: etDate(new Date(now - (DAYS - i) * DAY_MS)),
+        totalReturnPct: (wealth - 1) * 100,
+      });
+    });
+    peaks.set(p.id, peak);
+    const settled = 20 + Math.floor(rand() * 30);
+    return {
+      personId: p.id,
+      account: "paper",
+      lastSeen: new Date(now).toISOString(),
+      equity: START * wealth,
+      totalReturnPct: (wealth - 1) * 100,
+      todayPct: 0,
+      maxDrawdownPct: dd * 100,
+      openPositions: 2 + Math.floor(rand() * 6),
+      settledBets: settled,
+      wonBets: Math.round(settled * (0.42 + rand() * 0.2)),
+      feesPaid: 10 + rand() * 30,
+    };
+  });
+  let bets = Array.from({ length: 8 }, (_, i) => fakeBet(rand, now - (i + 1) * 47 * 60_000));
+  const startsAt = new Date(now - DAYS * DAY_MS).toISOString();
+  const lastClose = new Map(PEOPLE.map((p) => [p.id, closes.filter((c) => c.personId === p.id).at(-1)!.totalReturnPct]));
+
+  const tick = () => {
+    for (const s of stats) {
+      const total = s.totalReturnPct + gaussian(Math.random) * 0.35;
+      const wealth = 1 + total / 100;
+      const peak = Math.max(peaks.get(s.personId)!, wealth);
+      peaks.set(s.personId, peak);
+      s.totalReturnPct = total;
+      s.equity = START * wealth;
+      s.todayPct = (wealth / (1 + lastClose.get(s.personId)! / 100) - 1) * 100;
+      s.maxDrawdownPct = Math.min(s.maxDrawdownPct, (wealth / peak - 1) * 100);
+      s.lastSeen = new Date().toISOString();
+    }
+    if (Math.random() < 0.3) {
+      const bet = fakeBet(Math.random, Date.now());
+      bets = [bet, ...bets].slice(0, 30);
+      const s = stats.find((x) => x.personId === bet.personId)!;
+      s.settledBets = (s.settledBets ?? 0) + 1;
+      if (bet.result === "won") s.wonBets = (s.wonBets ?? 0) + 1;
+    }
+  };
+
   return {
     kind: "demo",
-    async load() {
+    async load(): Promise<Dataset> {
       // Faces taken on the demo Profile page show on Jon's card.
       const jonFaces = await loadDemoFaces();
-      const people = state.people.map((p) => (p.id === "demo-jon" ? { ...p, gifs: jonFaces } : p));
-      return { ...state, people, daily: [...state.daily], snapshots: [...state.snapshots] };
+      return {
+        people: PEOPLE.map(({ id, displayName, color }) => ({
+          id,
+          displayName,
+          color,
+          gifs: id === "demo-jon" ? jonFaces : {},
+        })),
+        season: { id: "demo", name: "Polymarket", startsAt, endsAt: null, startEquity: START },
+        stats: stats.map((s) => ({ ...s })),
+        closes,
+        bets,
+        checkIns: [],
+        settings: { snapshotMinutes: 10, staleAfterMinutes: 45 },
+      };
     },
     subscribe(onChange) {
       const timer = setInterval(() => {
-        const now = new Date().toISOString();
-        for (const p of PEOPLE) {
-          const last = state.snapshots.filter((s) => s.personId === p.id).at(-1);
-          const total = (last?.totalReturnPct ?? 0) + gaussian(Math.random) * 0.35;
-          state.snapshots.push({
-            personId: p.id,
-            account: "paper",
-            ts: now,
-            equity: 100000 * (1 + total / 100),
-            totalReturnPct: total,
-          });
-        }
+        tick();
         onChange();
       }, TICK_MS);
       return () => clearInterval(timer);

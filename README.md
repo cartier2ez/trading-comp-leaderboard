@@ -1,8 +1,8 @@
 # Bot Race
 
-Shared leaderboard for the Jon / Ruben / Ian trading-bot competition. Highest % return
-wins; SPY is a reference line. Live race during market hours, official score at the close,
-rank-based faces (😁 1st, 😐 2nd, 😭 3rd) that swap when someone gets overtaken.
+Shared leaderboard for the Jon / Ruben / Ian Polymarket bot competition (simulation).
+Highest % return wins. Live 24/7, with rank-based faces (😁 1st, 😐 2nd, 😭 3rd) that swap
+when someone gets overtaken. The earlier stock season is archived, not deleted.
 
 - Frontend: Vite + React + TypeScript, static, hosted on Vercel (or Netlify)
 - Backend: Supabase (Postgres + row-level security, magic-link auth, Storage for GIFs,
@@ -21,14 +21,18 @@ npm run dev:demo      # fake data for 3 bots, ticks every 3.5 s
 ### 1. Supabase project
 
 1. Create a free project at supabase.com.
-2. Install the CLI (`brew install supabase/tap/supabase`), then from this folder:
+2. The CLI is a dev dependency. From this folder:
 
 ```bash
-supabase login
-supabase link --project-ref <your-project-ref>
-supabase db push                                  # creates tables, RLS, GIF bucket
-supabase functions deploy report --no-verify-jwt  # the bot endpoint
+npm install
+npx supabase login
+npx supabase link
+npx supabase db push --remote --dry-run            # shows what would be applied
+npx supabase db push --remote                      # tables, access rules, GIF bucket
+npx supabase functions deploy report --no-verify-jwt
 ```
+
+   When an AI assistant runs these, the CLI wants your OK for each production change.
 
 3. **Authentication → Sign In / Providers**: turn **off** "Allow new users to sign up".
    Email (magic link) stays on.
@@ -39,7 +43,9 @@ supabase functions deploy report --no-verify-jwt  # the bot endpoint
    custom SMTP (Authentication → Emails → SMTP; e.g. Resend's free tier).
 6. **Authentication → Users → Invite user**: invite Ruben's and Ian's emails (and yours).
    A profile row is created automatically on invite.
-7. Optional: edit the `settings` row (Table editor) once the rules are final.
+7. Season dates and start equity live in the `seasons` table; `settings.current_season`
+   picks the one shown. Returns are computed from these, so an edit takes effect at once.
+   Real money stays closed until `live_start_equity` is set.
 
 ### 2. Vercel
 
@@ -61,7 +67,7 @@ npm run dev
 ```bash
 npm run dev        # dev server (Supabase if .env.local is set, else demo)
 npm run dev:demo   # always demo data
-npm test           # unit tests (validator, ranking, overtakes)
+npm test           # unit tests + migrations and endpoint on an in-process Postgres
 npm run typecheck
 npm run build
 ```

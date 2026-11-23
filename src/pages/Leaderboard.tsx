@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BetList } from "../components/BetList";
 import { OvertakeBanner, overtakeText } from "../components/OvertakeBanner";
 import { PodiumCard } from "../components/PodiumCard";
 import { RaceChart } from "../components/RaceChart";
 import { RULES_NOTE } from "../config";
-import { personRows, raceRows } from "../lib/chart";
+import { raceRows } from "../lib/chart";
+import { fmtMoney } from "../lib/format";
 import { detectOvertakes } from "../lib/overtakes";
 import { computeStandings, type Standing } from "../lib/ranking";
-import { isMarketOpen, relativeTime } from "../lib/time";
+import { etDateTime, isStale, relativeTime, seasonPhase, timeUntil } from "../lib/time";
 import type { Account, DataSource, Dataset } from "../lib/types";
 import { useFlip } from "../lib/useFlip";
 
 const TABS: { id: Account; label: string }[] = [
-  { id: "paper", label: "📝 Paper" },
+  { id: "paper", label: "🎲 Simulation" },
   { id: "live", label: "💸 Real money" },
 ];
 
@@ -27,7 +29,7 @@ export function Leaderboard({ source }: { source: DataSource }) {
   const [ds, setDs] = useState<Dataset | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
-  const [account, setAccount] = useState<Account>(initialTab);
+  const [tab, setTab] = useState<Account>(initialTab);
   const [now, setNow] = useState(() => new Date());
   const [banners, setBanners] = useState<{ id: string; text: string }[]>([]);
 
@@ -64,13 +66,17 @@ export function Leaderboard({ source }: { source: DataSource }) {
   }, []);
 
   const pickTab = (a: Account) => {
-    setAccount(a);
+    setTab(a);
     try {
       localStorage.setItem("tab", a);
     } catch {
       /* private mode etc. */
     }
   };
+
+  // The real-money tab stays hidden until someone goes live.
+  const anyoneLive = ds?.stats.some((s) => s.account === "live") ?? false;
+  const account: Account = anyoneLive ? tab : "paper";
 
   const standings = useMemo(() => (ds ? computeStandings(ds, account) : []), [ds, account]);
   const ranked = standings.filter((s) => s.rank !== null);
@@ -91,30 +97,34 @@ export function Leaderboard({ source }: { source: DataSource }) {
 
   const flipRef = useFlip(ranked.map((s) => s.person.id));
   const rows = useMemo(() => (ds ? raceRows(ds, account, standings) : []), [ds, account, standings]);
-  const marketOpen = isMarketOpen(now);
-  const staleMs = (ds?.settings.staleAfterMinutes ?? 30) * 60 * 1000;
+  const phase = ds ? seasonPhase(ds.season, now) : null;
 
   return (
     <main className="board">
       <div className="board-head">
-        <nav className="tabs" role="tablist">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              role="tab"
-              aria-selected={account === t.id}
-              className={account === t.id ? "active" : ""}
-              onClick={() => pickTab(t.id)}
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-        <span className={`live-pill ${marketOpen ? "on" : ""}`}>
-          <span className="dot" />
-          {marketOpen ? "Market open · live" : "Market closed"}
-          {updatedAt && <span className="muted"> · updated {relativeTime(updatedAt, now)}</span>}
-        </span>
+        {anyoneLive && (
+          <nav className="tabs" role="tablist">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                role="tab"
+                aria-selected={account === t.id}
+                className={account === t.id ? "active" : ""}
+                onClick={() => pickTab(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
+        )}
+        {ds && (
+          <span className={`live-pill ${phase === "running" ? "on" : ""}`}>
+            <span className="dot" />
+            {ds.season.name}{" "}
+            {phase === "before" ? `starts in ${timeUntil(ds.season.startsAt, now)}` : phase === "over" ? "· final" : "· live 24/7"}
+            {updatedAt && <span className="muted"> · updated {relativeTime(updatedAt, now)}</span>}
+          </span>
+        )}
       </div>
 
       <OvertakeBanner items={banners} onDone={dismiss} />
@@ -124,15 +134,21 @@ export function Leaderboard({ source }: { source: DataSource }) {
 
       {ds && ranked.length === 0 && (
         <section className="empty">
-          {account === "live" ? (
+          <p className="big">🏁</p>
+          {phase === "before" ? (
             <>
-              <p className="big">💸</p>
-              <p>Nobody's racing with real money yet.</p>
-              <p className="muted">First one to go live gets a card here.</p>
+              <p>
+                {ds.season.name} starts {etDateTime(ds.season.startsAt)} with {fmtMoney(ds.season.startEquity)} each.
+              </p>
+              <p className="muted">
+                Bots connected:{" "}
+                {ds.people
+                  .map((p) => `${p.displayName} ${ds.checkIns.some((c) => c.personId === p.id) ? "✅" : "—"}`)
+                  .join(" · ")}
+              </p>
             </>
           ) : (
             <>
-              <p className="big">🏁</p>
               <p>No bot has reported yet.</p>
               <p className="muted">Generate a bot token on your profile page and follow BOT_GUIDE.md.</p>
             </>
@@ -142,22 +158,26 @@ export function Leaderboard({ source }: { source: DataSource }) {
 
       {ranked.length > 0 && (
         <section className="podium">
-          {ranked.map((s) => (
-            <PodiumCard
-              key={s.person.id}
-              cardRef={flipRef(s.person.id)}
-              standing={s}
-              now={now}
-              stale={marketOpen && s.lastSeen !== null && now.getTime() - Date.parse(s.lastSeen) > staleMs}
-              spark={ds ? personRows(ds, account, s) : []}
-            />
-          ))}
+          {ranked.map(
+            (s) =>
+              s.stats && (
+                <PodiumCard
+                  key={s.person.id}
+                  cardRef={flipRef(s.person.id)}
+                  standing={s}
+                  stats={s.stats}
+                  now={now}
+                  stale={isStale(s.stats.lastSeen, ds!.season, ds!.settings.staleAfterMinutes, now)}
+                  rows={rows}
+                />
+              ),
+          )}
         </section>
       )}
 
       {waiting.length > 0 && ranked.length > 0 && (
         <p className="waiting">
-          {account === "live" ? "Still on paper: " : "No report yet: "}
+          {account === "live" ? "Still in simulation: " : "No report yet: "}
           {waiting.map((s) => s.person.displayName).join(", ")}
         </p>
       )}
@@ -166,6 +186,13 @@ export function Leaderboard({ source }: { source: DataSource }) {
         <section className="panel">
           <h3>The race · total % return</h3>
           <RaceChart rows={rows} people={ranked.map((s) => s.person)} />
+        </section>
+      )}
+
+      {ds && ranked.length > 0 && (
+        <section className="panel">
+          <h3>Latest settled bets</h3>
+          <BetList bets={ds.bets.filter((b) => b.account === account)} people={ds.people} now={now} />
         </section>
       )}
 
