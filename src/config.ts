@@ -21,7 +21,7 @@ export const OVERTAKE_LINES = [
 ];
 
 export const RULES_NOTE =
-  "Ranked by total % return since the season started. Open bets count at the simulator's midpoint price. " +
+  "Ranked by total % return since the season started. Open bets count at the simulator's price. " +
   "Only settled bets are shown; nobody can see open ones.";
 
 /** How long the page waits without realtime events before re-fetching anyway. */

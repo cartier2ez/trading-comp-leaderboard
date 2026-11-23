@@ -34,7 +34,7 @@ describe("snapshots", () => {
         sim_version: null,
       },
     });
-    const full = { ...snap, open_positions: 4, settled_bets: 12, won_bets: 7, fees_paid: 3.2, sim_version: "us-0.4.13.1" };
+    const full = { ...snap, open_positions: 4, settled_bets: 12, won_bets: 7, fees_paid: 3.2, sim_version: "0.4.13+us.2" };
     expect(validateReport(full, NOW).ok).toBe(true);
   });
 

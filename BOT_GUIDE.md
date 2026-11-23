@@ -49,7 +49,7 @@ The server knows who you are from the token and adds the time and season itself.
   "settled_bets": 12,
   "won_bets": 7,
   "fees_paid": 3.21,
-  "sim_version": "us-0.4.13.1"
+  "sim_version": "0.4.13+us.2"
 }
 ```
 
@@ -58,18 +58,21 @@ The server knows who you are from the token and adds the time and season itself.
 | `schema_version` | yes | `2` |
 | `type` | yes | `"snapshot"` |
 | `account` | yes | `"paper"` (simulation). `"live"` is rejected until real money opens. |
-| `equity` | yes | Total account value in dollars, **exactly as the pinned simulator reports it**: cash plus open bets at the midpoint price. Don't re-value bets yourself. 0 is allowed. |
+| `equity` | yes | Total account value in dollars, **exactly as the pinned simulator reports it**: its total account value, cash plus open bets (normally at the midpoint price). Don't re-value bets yourself. 0 is allowed. |
 | `open_positions` | no | How many bets are open. A count only. |
 | `settled_bets` | no | Bets settled since the season started (running total). |
 | `won_bets` | no | How many of those won. Needs `settled_bets`. |
 | `fees_paid` | no | Dollars of fees since the season started (running total). |
-| `sim_version` | no | Simulator tag, so a version mismatch is easy to spot. |
+| `sim_version` | no, but please send it | The simulator's version, `0.4.13+us.2`. |
 
-**Don't send a snapshot while any open bet has `live_price` 0.** The pinned simulator
-silently uses 0 when a price lookup fails or the order book is empty, so your equity
-looks far too low. Skip that snapshot and retry next cycle. Never guess or fill in a price.
-The server doesn't filter reports: whatever you send counts toward rank, drawdown and closes.
-This is a stopgap until the three of you agree on a simulator fix.
+**Use simulator `0.4.13+us.2` (tag `us-0.4.13.2`).** Don't use `us.1`: it counts a bet as
+worth $0 when a price lookup fails. Existing `us.1` accounts open fine in `us.2`.
+
+**Skip a snapshot while `get_balance` reports `stale_positions` above 0**, and try again
+next cycle. It means a price lookup failed, so the equity isn't current. Bets waiting for
+a result don't count as stale. If it lasts more than an hour, tell the other two and look
+into it; never fill in a price. The server doesn't filter reports: whatever you send
+counts toward rank, drawdown and closes.
 
 There is no daily report. The server takes each day's close from your last snapshot
 before New York midnight; if your bot is offline, the last one before that counts. The
@@ -158,7 +161,8 @@ python send_report.py bets bets.json
 - [ ] Token in `.env`, `.env` git-ignored
 - [ ] Test snapshot returns `200`
 - [ ] Snapshot every 10 min, 24/7, on a machine that stays awake
-- [ ] Snapshot skipped while any open bet has `live_price` 0
+- [ ] Simulator is `0.4.13+us.2`
+- [ ] Snapshot skipped while `stale_positions` is above 0
 - [ ] Settled bets sent once finished, with a stored `settled_at`
 - [ ] Failures logged, never fatal; `429` ignored
 - [ ] Simulator reset to $10,000 with no open bets at the start
